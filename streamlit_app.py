@@ -3,147 +3,157 @@ import pandas as pd
 import time
 import json
 import tempfile
-
-from pdf_processor import extract_text_from_pdf
 from gemini_extractor import extract_rules_with_gemini
 from rule_engine import apply_rules_to_dataset
 from ml_model import apply_anomaly_detection
-from risk_scoring import calculate_risk_score
+from report_generator import generate_pdf_report
+from pdf_processor import extract_text_from_pdf, clean_ocr_text
 
-st.set_page_config(page_title="PolicyGuard AI", layout="wide")
+st.set_page_config(layout="wide")
 
 st.title("🔐 PolicyGuard AI - AML Compliance Monitoring System")
 
-# -----------------------------
-# File Upload Section
-# -----------------------------
+# --------------------------
+# SESSION STATE INIT
+# --------------------------
 
-st.subheader("Upload AML Policy PDF")
-policy_file = st.file_uploader("Upload Policy PDF", type=["pdf"])
+if "analysis_done" not in st.session_state:
+    st.session_state.analysis_done = False
 
-st.subheader("Upload Transactions CSV")
+# --------------------------
+# FILE UPLOAD
+# --------------------------
+
+policy_file = st.file_uploader("Upload AML Policy PDF", type=["pdf"])
 transaction_file = st.file_uploader("Upload Transactions CSV", type=["csv"])
 
-# -----------------------------
-# Main Processing
-# -----------------------------
+# --------------------------
+# RUN ANALYSIS BUTTON
+# --------------------------
 
 if st.button("🚀 Run Compliance Analysis"):
 
-    if policy_file is None or transaction_file is None:
-        st.error("Please upload both Policy PDF and Transactions CSV.")
-        st.stop()
+    if policy_file and transaction_file:
 
-    start_time = time.time()
+        start_time = time.time()
 
-    # -----------------------------------
-    # STEP 1: Extract text from PDF
-    # -----------------------------------
+        # Save temp PDF
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(policy_file.read())
+            temp_pdf_path = tmp.name
 
-    policy_text = extract_text_from_pdf(policy_file)
+        # Extract text
+        policy_text = extract_text_from_pdf(temp_pdf_path)
+        policy_text = clean_ocr_text(policy_text)
 
-    # -----------------------------------
-    # STEP 2: Extract Rules from Gemini
-    # -----------------------------------
+        # Extract rules using Gemini
+        rules_json = extract_rules_with_gemini(policy_text)
 
-    rules_json = extract_rules_with_gemini(policy_text)
+        try:
+            rules_list = json.loads(rules_json)
+        except:
+            st.error("Gemini did not return valid JSON rules.")
+            st.stop()
 
-    try:
-        rules_list = json.loads(rules_json)
-    except:
-        st.error("❌ Gemini did not return valid JSON rules.")
-        st.stop()
+        # --------------------------
+        # CHUNK PROCESSING (FULL DATASET)
+        # --------------------------
 
-    st.subheader("📜 Extracted Rules")
-    st.json(rules_list)
+        chunks = pd.read_csv(transaction_file, chunksize=50000)
 
-    # Save extracted rules for download
-    rules_file = json.dumps(rules_list, indent=4)
+        processed_chunks = []
+        total_rows = 0
 
-    st.download_button(
-        label="📥 Download Extracted Rules (JSON)",
-        data=rules_file,
-        file_name="extracted_rules.json",
-        mime="application/json"
-    )
+        for chunk in chunks:
+            chunk = apply_rules_to_dataset(chunk, rules_list)
+            chunk = apply_anomaly_detection(chunk)
 
-    # -----------------------------------
-    # STEP 3: Process Large CSV in Chunks
-    # -----------------------------------
+            processed_chunks.append(chunk)
+            total_rows += len(chunk)
 
-    chunks = pd.read_csv(transaction_file, chunksize=50000)
+        df = pd.concat(processed_chunks, ignore_index=True)
 
-    processed_chunks = []
-    total_rows = 0
-    total_violations = 0
-    total_anomalies = 0
+        end_time = time.time()
 
-    progress = st.progress(0)
-    chunk_count = 0
+        # --------------------------
+        # SAVE TO SESSION STATE
+        # --------------------------
 
-    for chunk in chunks:
+        st.session_state.df = df
+        st.session_state.rules = rules_list
+        st.session_state.total_rows = total_rows
+        st.session_state.processing_time = round(end_time - start_time, 2)
+        st.session_state.analysis_done = True
 
-        # Apply Rules
-        chunk = apply_rules_to_dataset(chunk, rules_list)
+        st.success("✅ AML Analysis Completed Successfully!")
 
-        # Apply Anomaly Detection
-        chunk = apply_anomaly_detection(chunk)
+# =====================================================
+# DISPLAY RESULTS (AFTER ANALYSIS)
+# =====================================================
 
-        # Risk Scoring
-        chunk = calculate_risk_score(chunk)
+if st.session_state.analysis_done:
 
-        # Count Stats
-        total_rows += len(chunk)
-        total_violations += (chunk["Violated_Rule"] != "").sum()
-        total_anomalies += chunk["Anomaly_Flag"].sum()
+    df = st.session_state.df
+    rules_list = st.session_state.rules
 
-        processed_chunks.append(chunk)
-
-        chunk_count += 1
-        progress.progress(min(chunk_count / 100, 1.0))
-
-    df = pd.concat(processed_chunks, ignore_index=True)
-
-    # -----------------------------------
-    # STEP 4: High Risk Filtering
-    # -----------------------------------
+    # --------------------------
+    # HIGH RISK FILTER
+    # --------------------------
 
     high_risk_df = df[
         (df["Violated_Rule"] != "") |
         (df["Anomaly_Flag"] == True)
     ]
 
-    st.success("✅ AML Analysis Completed Successfully!")
-
-    # -----------------------------------
-    # STEP 5: Display Only Top 100 (Avoid Crash)
-    # -----------------------------------
-
     st.subheader("🔴 High Risk Transactions (Top 100 Only)")
     st.dataframe(high_risk_df.head(100))
 
-    # -----------------------------------
-    # STEP 6: Download Full High Risk CSV
-    # -----------------------------------
+    # --------------------------
+    # DOWNLOAD ALL HIGH RISK CSV
+    # --------------------------
 
     csv_data = high_risk_df.to_csv(index=False).encode("utf-8")
 
     st.download_button(
-        label="📥 Download All High Risk Transactions (CSV)",
+        "⬇ Download All High Risk Transactions (CSV)",
         data=csv_data,
-        file_name="all_high_risk_transactions.csv",
+        file_name="high_risk_transactions.csv",
         mime="text/csv"
     )
 
-    # -----------------------------------
-    # STEP 7: Summary Panel
-    # -----------------------------------
+    # --------------------------
+    # DOWNLOAD FULL PDF REPORT
+    # --------------------------
 
-    end_time = time.time()
+    pdf_file = generate_pdf_report(high_risk_df)
+
+    st.download_button(
+        "⬇ Download Full High Risk Report (PDF)",
+        data=pdf_file,
+        file_name="high_risk_report.pdf",
+        mime="application/pdf"
+    )
+
+    # --------------------------
+    # DOWNLOAD EXTRACTED RULES
+    # --------------------------
+
+    rules_json_download = json.dumps(rules_list, indent=4)
+
+    st.download_button(
+        "⬇ Download Extracted Rules (JSON)",
+        data=rules_json_download,
+        file_name="extracted_rules.json",
+        mime="application/json"
+    )
+
+    # --------------------------
+    # SUMMARY PANEL
+    # --------------------------
 
     st.subheader("📊 Analysis Summary")
 
-    st.write("Total Rows Processed:", total_rows)
-    st.write("Total Violations:", total_violations)
-    st.write("Total Anomalies:", total_anomalies)
-    st.write("⏱ Processing Time:", round(end_time - start_time, 2), "seconds")
+    st.write("Total Rows Processed:", st.session_state.total_rows)
+    st.write("Total Violations:", (df["Violated_Rule"] != "").sum())
+    st.write("Total Anomalies:", df["Anomaly_Flag"].sum())
+    st.write("⏱ Processing Time:", st.session_state.processing_time, "seconds")
