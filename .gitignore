@@ -1,0 +1,14 @@
+# Secrets
+.env
+vision_key.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Large files
+*.csv
+*.pdf
