@@ -3,6 +3,6 @@ pandas
 numpy
 scikit-learn
 google-generativeai
+google-cloud-vision
 python-dotenv
 reportlab
-
