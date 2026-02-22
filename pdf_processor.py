@@ -1,66 +1,61 @@
-from google.cloud import vision
-from google.oauth2 import service_account
 import io
 import re
+import fitz  # PyMuPDF
+from google.cloud import vision
 
-# Load Vision credentials
-credentials = service_account.Credentials.from_service_account_file(
-    "vision_key.json"
-)
-
-client = vision.ImageAnnotatorClient(credentials=credentials)
-
-
-def extract_text_from_pdf(file_input):
+def extract_text_from_pdf(uploaded_file):
     """
-    Accepts either:
-    - Streamlit UploadedFile
-    - File path string
+    Extract text from both:
+    - Normal text PDFs
+    - Scanned image PDFs using Google Vision OCR
     """
-
-    # Case 1: Streamlit UploadedFile
-    if hasattr(file_input, "read"):
-        file_input.seek(0)
-        content = file_input.read()
-
-    # Case 2: Normal file path
-    else:
-        with io.open(file_input, "rb") as pdf_file:
-            content = pdf_file.read()
-
-    input_config = vision.InputConfig(
-        content=content,
-        mime_type="application/pdf"
-    )
-
-    feature = vision.Feature(
-        type_=vision.Feature.Type.DOCUMENT_TEXT_DETECTION
-    )
-
-    request = vision.AnnotateFileRequest(
-        input_config=input_config,
-        features=[feature]
-    )
-
-    response = client.batch_annotate_files(requests=[request])
 
     text = ""
 
-    for res in response.responses[0].responses:
-        if res.full_text_annotation:
-            text += res.full_text_annotation.text
+    # ---------------------------
+    # Try normal text extraction
+    # ---------------------------
+    try:
+        pdf_bytes = uploaded_file.read()
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
 
-    return text
+        for page in doc:
+            text += page.get_text()
+
+        # If sufficient text found, return directly
+        if len(text.strip()) > 200:
+            return text
+
+    except Exception as e:
+        print("Normal PDF extraction failed:", e)
+
+    # ---------------------------
+    # Fallback to OCR
+    # ---------------------------
+    try:
+        client = vision.ImageAnnotatorClient()
+
+        pdf_bytes = uploaded_file.getvalue()
+
+        image = vision.Image(content=pdf_bytes)
+        response = client.document_text_detection(image=image)
+
+        if response.error.message:
+            raise Exception(response.error.message)
+
+        text = response.full_text_annotation.text
+        return text
+
+    except Exception as e:
+        print("OCR extraction failed:", e)
+        return ""
+
 
 
 def clean_ocr_text(text):
-    text = re.sub(r'-\s+', '', text)
-    text = re.sub(r'\n+', ' ', text)
-    text = re.sub(r'\s{2,}', ' ', text)
-    text = re.sub(r'\s([?.!,])', r'\1', text)
+    """
+    Clean OCR noise
+    """
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'[^\x00-\x7F]+', ' ', text)
     return text.strip()
-
-
-def split_into_paragraphs(text):
-    paragraphs = re.split(r'(?<=\.)\s+(?=[A-Z])', text)
-    return paragraphs

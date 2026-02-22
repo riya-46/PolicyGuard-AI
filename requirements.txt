@@ -6,3 +6,5 @@ google-generativeai
 google-cloud-vision
 python-dotenv
 reportlab
+google-cloud-vision
+PyMuPDF
